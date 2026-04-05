@@ -23,7 +23,10 @@ final class TranscriptionEngine: ObservableObject {
     @Published var errorMessage: String?
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    private let audioEngine = AVAudioEngine()
+    // Optional + recreated per session so stopping the recording fully releases the mic hardware.
+    // Keeping a long-lived AVAudioEngine instance caused the mic to re-activate on system audio
+    // events (YouTube play, spacebar media keys) even though our app was "idle".
+    private var audioEngine: AVAudioEngine?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var tapBufferCount: Int = 0
@@ -152,6 +155,10 @@ final class TranscriptionEngine: ObservableObject {
         // Tear down any prior session cleanly before starting a new one.
         stopAudio()
 
+        // Fresh engine every session so the mic is only ever hot while we're actively recording.
+        let audioEngine = AVAudioEngine()
+        self.audioEngine = audioEngine
+
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         if #available(macOS 13, *) {
@@ -185,19 +192,13 @@ final class TranscriptionEngine: ObservableObject {
         }
 
         let inputNode = audioEngine.inputNode
-        let nativeFormat = inputNode.outputFormat(forBus: 0)
-        Log.log("audio", "input node native format sampleRate=\(nativeFormat.sampleRate) channels=\(nativeFormat.channelCount)")
-
-        // Ask AVAudioEngine to deliver buffers at 16 kHz mono Float32 — what the speech recognizer
-        // expects. On macOS 10.15+ installTap auto-converts when the requested format differs from
-        // the node's output format. This is the fix for the "tap never fires at 44.1 kHz" bug.
-        let tapFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        ) ?? nativeFormat
-        Log.log("audio", "tap requested format sampleRate=\(tapFormat.sampleRate) channels=\(tapFormat.channelCount)")
+        // IMPORTANT: on an AVAudioEngine input node you MUST pass the node's native output
+        // format to installTap — Apple's docs say it does not auto-convert for input nodes and
+        // passing a mismatched format throws an unrecoverable Objective-C exception (hard crash).
+        // SFSpeechAudioBufferRecognitionRequest.append() accepts PCM at any sample rate; the
+        // recognizer handles resampling internally. This matches Apple's SpokenWord sample.
+        let tapFormat = inputNode.outputFormat(forBus: 0)
+        Log.log("audio", "tap format (native) sampleRate=\(tapFormat.sampleRate) channels=\(tapFormat.channelCount)")
 
         tapBufferCount = 0
         inputNode.removeTap(onBus: 0)
@@ -236,13 +237,24 @@ final class TranscriptionEngine: ObservableObject {
     }
 
     private func stopAudio() {
-        if audioEngine.isRunning {
-            audioEngine.stop()
-        }
-        audioEngine.inputNode.removeTap(onBus: 0)
+        // End the recognition task & request first so the recognizer stops pulling audio.
         request?.endAudio()
-        request = nil
-        task?.cancel()
+        task?.finish()
         task = nil
+        request = nil
+
+        if let engine = audioEngine {
+            if engine.isRunning { engine.stop() }
+            engine.inputNode.removeTap(onBus: 0)
+            // Explicitly sever graph connections to the input node before releasing the engine.
+            // Without these disconnects, the underlying CoreAudio HAL connection to the microphone
+            // hardware is held warm and can re-light the mic indicator when the system audio
+            // subsystem is probed by unrelated apps (e.g. YouTube play, media keys).
+            engine.disconnectNodeInput(engine.inputNode)
+            engine.disconnectNodeOutput(engine.inputNode)
+            engine.reset()
+        }
+        audioEngine = nil
+        Log.log("audio", "stopAudio → engine released + input disconnected")
     }
 }

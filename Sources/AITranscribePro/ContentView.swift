@@ -95,12 +95,12 @@ struct ContentView: View {
         switch engine.state {
         case .recording: return "Listening…"
         case .paused:    return "Paused"
-        case .idle, .stopped:
-            // Fall back to the most recent history entry so the window is never empty after the
-            // first use. The text is a real, copyable transcript — press mic to start a new one.
-            if let last = history.entries.first { return last.text }
-            return "Press record to start transcribing…"
+        case .idle:      return "Press record to start transcribing…"
+        case .stopped:   return "Press record to start transcribing…"
         }
+        // Past transcripts are surfaced via the history popover, not in the live display area —
+        // this keeps the reset button's effect visible (it previously looked broken because the
+        // display was falling back to history.entries.first after reset).
     }
 
     @ViewBuilder
