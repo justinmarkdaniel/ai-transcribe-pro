@@ -185,17 +185,29 @@ final class TranscriptionEngine: ObservableObject {
         }
 
         let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        Log.log("audio", "tap format sampleRate=\(format.sampleRate) channels=\(format.channelCount)")
+        let nativeFormat = inputNode.outputFormat(forBus: 0)
+        Log.log("audio", "input node native format sampleRate=\(nativeFormat.sampleRate) channels=\(nativeFormat.channelCount)")
+
+        // Ask AVAudioEngine to deliver buffers at 16 kHz mono Float32 — what the speech recognizer
+        // expects. On macOS 10.15+ installTap auto-converts when the requested format differs from
+        // the node's output format. This is the fix for the "tap never fires at 44.1 kHz" bug.
+        let tapFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        ) ?? nativeFormat
+        Log.log("audio", "tap requested format sampleRate=\(tapFormat.sampleRate) channels=\(tapFormat.channelCount)")
 
         tapBufferCount = 0
         inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+        // bufferSize 4096 is safer across macOS versions than 1024 for input node taps.
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { [weak self] buffer, _ in
             guard let self else { return }
             self.request?.append(buffer)
             self.tapBufferCount += 1
             if self.tapBufferCount == 1 || self.tapBufferCount % 50 == 0 {
-                Log.log("audio", "tap buffer #\(self.tapBufferCount) frames=\(buffer.frameLength)")
+                Log.log("audio", "tap buffer #\(self.tapBufferCount) frames=\(buffer.frameLength) sampleRate=\(buffer.format.sampleRate)")
             }
         }
 
