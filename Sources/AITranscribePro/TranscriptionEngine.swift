@@ -30,6 +30,7 @@ final class TranscriptionEngine: ObservableObject {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var tapBufferCount: Int = 0
+    private var configChangeObserver: NSObjectProtocol?
 
     // Anything finalized in previous recording segments (survives pause/resume).
     private var committedPrefix: String = ""
@@ -159,6 +160,29 @@ final class TranscriptionEngine: ObservableObject {
         let audioEngine = AVAudioEngine()
         self.audioEngine = audioEngine
 
+        // Watch for audio route changes (headphones plugged/unplugged, Bluetooth device
+        // connected, etc.). When the hardware config changes mid-recording the existing tap
+        // format is stale and audio silently stops flowing — restart the pipeline.
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Log.log("audio", "AVAudioEngineConfigurationChange — audio route changed")
+            Task { @MainActor in
+                guard self.state == .recording else { return }
+                Log.log("audio", "restarting recognition after route change")
+                self.committedPrefix = self.transcript
+                self.stopAudio()
+                // Brief delay so the new audio device settles before we re-tap.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self, self.state == .recording else { return }
+                    self.startRecognition(retriesLeft: 3)
+                }
+            }
+        }
+
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         if #available(macOS 13, *) {
@@ -237,6 +261,13 @@ final class TranscriptionEngine: ObservableObject {
     }
 
     private func stopAudio() {
+        // Remove the config-change observer before tearing down the engine so we don't
+        // re-enter during teardown.
+        if let obs = configChangeObserver {
+            NotificationCenter.default.removeObserver(obs)
+            configChangeObserver = nil
+        }
+
         // End the recognition task & request first so the recognizer stops pulling audio.
         request?.endAudio()
         task?.finish()
