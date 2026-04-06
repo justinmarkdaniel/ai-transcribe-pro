@@ -31,8 +31,10 @@ final class TranscriptionEngine: ObservableObject {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var tapBufferCount: Int = 0
-    private var configChangeObserver: NSObjectProtocol?
     private var bufferWatchdog: DispatchWorkItem?
+    /// Incremented on every stopAudio(); delayed restart callbacks bail if their
+    /// captured generation doesn't match, preventing restart storms.
+    private var sessionGeneration: Int = 0
 
     // Anything finalized in previous recording segments (survives pause/resume).
     private var committedPrefix: String = ""
@@ -164,35 +166,14 @@ final class TranscriptionEngine: ObservableObject {
 
         // If the default input device isn't delivering audio (e.g. Bluetooth headphones in A2DP
         // mode), force the engine to use the built-in microphone instead.
+        var forcedDeviceID: AudioDeviceID?
         if forceBuiltInMic, let builtIn = builtInMicDeviceID() {
             let name = deviceName(builtIn)
             if setInputDevice(builtIn, on: audioEngine) {
                 Log.log("audio", "forced input to built-in mic: \(name) (id=\(builtIn))")
+                forcedDeviceID = builtIn
             } else {
                 Log.log("audio", "failed to force built-in mic: \(name) (id=\(builtIn))")
-            }
-        }
-
-        // Watch for audio route changes (headphones plugged/unplugged, Bluetooth device
-        // connected, etc.). When the hardware config changes mid-recording the existing tap
-        // format is stale and audio silently stops flowing — restart the pipeline.
-        configChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: audioEngine,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            Log.log("audio", "AVAudioEngineConfigurationChange — audio route changed")
-            Task { @MainActor in
-                guard self.state == .recording else { return }
-                Log.log("audio", "restarting recognition after route change")
-                self.committedPrefix = self.transcript
-                self.stopAudio()
-                // Brief delay so the new audio device settles before we re-tap.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                    guard let self, self.state == .recording else { return }
-                    self.startRecognition(retriesLeft: 3)
-                }
             }
         }
 
@@ -229,8 +210,21 @@ final class TranscriptionEngine: ObservableObject {
         }
 
         let inputNode = audioEngine.inputNode
-        let tapFormat = inputNode.outputFormat(forBus: 0)
-        Log.log("audio", "tap format (native) sampleRate=\(tapFormat.sampleRate) channels=\(tapFormat.channelCount)")
+
+        // When we forced a specific input device, the engine's inputNode may still report a
+        // stale format from the previous (Bluetooth) device. Query CoreAudio directly for the
+        // true hardware format to avoid the fatal "Input HW format and tap format not matching"
+        // ObjC exception from installTap.
+        let tapFormat: AVAudioFormat
+        if let devID = forcedDeviceID,
+           let nativeRate = deviceNominalSampleRate(devID) {
+            let channels = max(deviceInputChannelCount(devID), 1)
+            tapFormat = AVAudioFormat(standardFormatWithSampleRate: nativeRate, channels: channels)!
+            Log.log("audio", "tap format (CoreAudio) sampleRate=\(nativeRate) channels=\(channels)")
+        } else {
+            tapFormat = inputNode.outputFormat(forBus: 0)
+            Log.log("audio", "tap format (native) sampleRate=\(tapFormat.sampleRate) channels=\(tapFormat.channelCount)")
+        }
 
         tapBufferCount = 0
         inputNode.removeTap(onBus: 0)
@@ -250,52 +244,64 @@ final class TranscriptionEngine: ObservableObject {
         } catch {
             Log.log("audio", "audio engine failed: \(error.localizedDescription)")
             errorMessage = "Audio engine failed: \(error.localizedDescription)"
+            state = .idle
             return
         }
 
         // Watchdog: if no tap buffers arrive within 2 seconds, the default input device is
-        // probably dead (common with Bluetooth headphones in A2DP output-only mode). Restart
-        // with the built-in microphone forced as input.
-        if !forceBuiltInMic {
-            let watchdog = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                Task { @MainActor in
-                    guard self.state == .recording, self.tapBufferCount == 0 else { return }
+        // probably dead (common with Bluetooth headphones in A2DP output-only mode).
+        let gen = sessionGeneration
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                guard self.state == .recording, self.sessionGeneration == gen, self.tapBufferCount == 0 else { return }
+                if forceBuiltInMic {
+                    Log.log("audio", "watchdog: zero buffers even on built-in mic — giving up")
+                    self.errorMessage = "No audio from microphone. Check System Settings → Sound → Input."
+                    self.stopAudio()
+                    self.state = .idle
+                } else {
                     Log.log("audio", "watchdog: zero buffers after 2s — forcing built-in mic")
                     self.committedPrefix = self.transcript
                     self.stopAudio()
                     self.startRecognition(retriesLeft: 3, forceBuiltInMic: true)
                 }
             }
-            self.bufferWatchdog = watchdog
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: watchdog)
         }
+        self.bufferWatchdog = watchdog
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: watchdog)
 
         Log.log("engine", "recognition task installed, audio engine running")
     }
 
     private func restartRecognitionAfterError() {
         guard state == .recording else { return }
+        guard audioEngine != nil else {
+            Log.log("engine", "restartRecognitionAfterError skipped — engine already torn down")
+            return
+        }
+        // If no buffers ever arrived, the input device is dead — let the watchdog handle
+        // fallback to built-in mic instead of restart-looping.
+        if tapBufferCount == 0 {
+            Log.log("engine", "restartRecognitionAfterError skipped — zero buffers, deferring to watchdog")
+            return
+        }
         committedPrefix = transcript
         stopAudio()
-        // Brief delay so the audio unit can reset cleanly before we re-tap it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self, self.state == .recording else { return }
+        let gen = sessionGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, self.state == .recording, self.sessionGeneration == gen else { return }
             self.startRecognition(retriesLeft: 3)
         }
     }
 
     private func stopAudio() {
+        // Bump generation so any in-flight delayed restarts from the previous session bail out.
+        sessionGeneration += 1
+
         // Cancel the watchdog so it doesn't fire after teardown.
         bufferWatchdog?.cancel()
         bufferWatchdog = nil
-
-        // Remove the config-change observer before tearing down the engine so we don't
-        // re-enter during teardown.
-        if let obs = configChangeObserver {
-            NotificationCenter.default.removeObserver(obs)
-            configChangeObserver = nil
-        }
 
         // End the recognition task & request first so the recognizer stops pulling audio.
         request?.endAudio()
@@ -393,5 +399,35 @@ final class TranscriptionEngine: ObservableObject {
             UInt32(MemoryLayout<AudioDeviceID>.size)
         )
         return status == noErr
+    }
+
+    /// Returns the nominal sample rate for a CoreAudio device.
+    private nonisolated func deviceNominalSampleRate(_ deviceID: AudioDeviceID) -> Double? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var sampleRate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &sampleRate) == noErr else { return nil }
+        return sampleRate
+    }
+
+    /// Returns the number of input channels for a CoreAudio device.
+    private nonisolated func deviceInputChannelCount(_ deviceID: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr, size > 0 else { return 0 }
+        let bufListPtr = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
+        defer { bufListPtr.deallocate() }
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, bufListPtr) == noErr else { return 0 }
+        return (0..<Int(bufListPtr.pointee.mNumberBuffers)).reduce(0) { total, i in
+            UInt32(total) + UnsafeMutableAudioBufferListPointer(bufListPtr)[i].mNumberChannels
+        }
     }
 }
