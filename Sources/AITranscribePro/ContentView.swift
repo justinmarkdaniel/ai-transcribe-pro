@@ -19,69 +19,26 @@ struct ContentView: View {
                         .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
                 )
 
-            HStack(spacing: 10) {
-                // Live transcript area.
-                ScrollView(.vertical, showsIndicators: false) {
-                    ScrollViewReader { proxy in
-                        Text(displayText)
-                            .font(.system(size: 12, weight: .regular, design: .rounded))
-                            .foregroundColor(Color.white.opacity(0.92))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id("end")
-                            .onChange(of: engine.transcript) { _ in
-                                withAnimation(.easeOut(duration: 0.1)) {
-                                    proxy.scrollTo("end", anchor: .bottom)
-                                }
+            // Transcript fills the whole area; padding reserves space for the X (top-left)
+            // and the bottom control row. Long transcripts scroll behind the controls — the
+            // controls carry a subtle glow so they stay legible.
+            ScrollView(.vertical, showsIndicators: false) {
+                ScrollViewReader { proxy in
+                    Text(displayText)
+                        .font(.system(size: 12, weight: .regular, design: .rounded))
+                        .foregroundColor(Color.white.opacity(0.92))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id("end")
+                        .onChange(of: engine.transcript) { _ in
+                            withAnimation(.easeOut(duration: 0.1)) {
+                                proxy.scrollTo("end", anchor: .bottom)
                             }
-                    }
+                        }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.leading, 12)
-                .padding(.top, 22)
-                .padding(.bottom, 8)
-
-                // Controls — fixed 2×3 square grid, flush right, so cells never shift.
-                // Row 1: stop (reserved) · primary (mic/pause) · reset
-                // Row 2: gear            · history             · copy
-                Grid(alignment: .trailing, horizontalSpacing: 6, verticalSpacing: 6) {
-                    GridRow {
-                        stopSlot
-                        primaryButton
-                        iconButton(system: "arrow.counterclockwise", tint: .white.opacity(0.7)) {
-                            engine.reset()
-                        }
-                    }
-                    GridRow {
-                        iconButton(system: "gearshape.fill", tint: .white.opacity(0.7)) {
-                            showSettings.toggle()
-                        }
-                        .popover(isPresented: $showSettings, arrowEdge: .bottom) {
-                            SettingsView()
-                                .environmentObject(settings)
-                        }
-
-                        iconButton(system: "clock.arrow.circlepath", tint: .white.opacity(0.7)) {
-                            showHistory.toggle()
-                        }
-                        .popover(isPresented: $showHistory, arrowEdge: .bottom) {
-                            HistoryView()
-                                .environmentObject(history)
-                        }
-
-                        iconButton(
-                            system: copiedFlash ? "checkmark" : "doc.on.clipboard",
-                            tint: copiedFlash ? .green : .white.opacity(0.7)
-                        ) {
-                            copyCurrent()
-                        }
-                        .disabled(!hasCopyableText)
-                        .opacity(hasCopyableText ? 1 : 0.4)
-                    }
-                }
-                .padding(.trailing, 10)
-                .padding(.top, 22)
-                .padding(.bottom, 8)
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 22)
+            .padding(.bottom, 38)
         }
         .frame(minWidth: 360, minHeight: 104)
         .overlay(alignment: .topLeading) {
@@ -97,11 +54,68 @@ struct ContentView: View {
             .padding(.top, 6)
             .help("Quit AI Transcribe Pro")
         }
+        .overlay(alignment: .bottom) {
+            bottomControls
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
+        }
         .onAppear {
             engine.onCommit = { [weak history] text in
                 history?.add(text)
             }
         }
+    }
+
+    /// Bottom row: gear (leading) · stop/primary/reset (true-centered) · history/copy (trailing, 6pt).
+    /// Uses a ZStack so the center group stays optically centered regardless of the side
+    /// clusters' widths (left has 1 button, right has 2).
+    private var bottomControls: some View {
+        ZStack {
+            // Center group — positioned at the true center of the panel.
+            HStack(spacing: 6) {
+                stopSlot
+                primaryButton
+                iconButton(system: "arrow.counterclockwise", tint: .white.opacity(0.7)) {
+                    engine.reset()
+                }
+            }
+
+            // Leading cluster.
+            HStack {
+                iconButton(system: "gearshape.fill", tint: .white.opacity(0.7)) {
+                    showSettings.toggle()
+                }
+                .popover(isPresented: $showSettings, arrowEdge: .bottom) {
+                    SettingsView()
+                        .environmentObject(settings)
+                }
+                Spacer(minLength: 0)
+            }
+
+            // Trailing cluster.
+            HStack {
+                Spacer(minLength: 0)
+                HStack(spacing: 6) {
+                    iconButton(system: "clock.arrow.circlepath", tint: .white.opacity(0.7)) {
+                        showHistory.toggle()
+                    }
+                    .popover(isPresented: $showHistory, arrowEdge: .bottom) {
+                        HistoryView()
+                            .environmentObject(history)
+                    }
+
+                    iconButton(
+                        system: copiedFlash ? "checkmark" : "doc.on.clipboard",
+                        tint: copiedFlash ? .green : .white.opacity(0.7)
+                    ) {
+                        copyCurrent()
+                    }
+                    .disabled(!hasCopyableText)
+                    .opacity(hasCopyableText ? 1 : 0.4)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private var displayText: String {
@@ -150,6 +164,8 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(Color.white.opacity(0.06))
                 )
+                // Subtle dark halo so buttons stay readable when transcript scrolls behind them.
+                .shadow(color: .black.opacity(0.55), radius: 3, x: 0, y: 0)
         }
         .buttonStyle(.plain)
     }

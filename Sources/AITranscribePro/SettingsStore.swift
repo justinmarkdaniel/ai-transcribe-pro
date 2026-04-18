@@ -13,6 +13,11 @@ struct HotKeyConfig: Codable, Equatable {
         modifiersRaw: HotKeyModifiers([.command, .option, .shift]).rawValue
     )
 
+    static let defaultSecondary = HotKeyConfig(
+        keyCode: UInt32(kVK_Space),
+        modifiersRaw: HotKeyModifiers([.option]).rawValue
+    )
+
     /// Human-readable form, e.g. "⌘⇧R".
     var display: String {
         var s = ""
@@ -30,8 +35,12 @@ final class SettingsStore: ObservableObject {
     @Published var hotKey: HotKeyConfig {
         didSet { save() }
     }
+    @Published var hotKey2: HotKeyConfig {
+        didSet { save() }
+    }
 
     private let key = "settings.hotkey.v1"
+    private let key2 = "settings.hotkey2.v1"
 
     init() {
         if let data = UserDefaults.standard.data(forKey: key),
@@ -40,11 +49,20 @@ final class SettingsStore: ObservableObject {
         } else {
             self.hotKey = .default
         }
+        if let data = UserDefaults.standard.data(forKey: key2),
+           let decoded = try? JSONDecoder().decode(HotKeyConfig.self, from: data) {
+            self.hotKey2 = decoded
+        } else {
+            self.hotKey2 = .defaultSecondary
+        }
     }
 
     private func save() {
         if let data = try? JSONEncoder().encode(hotKey) {
             UserDefaults.standard.set(data, forKey: key)
+        }
+        if let data = try? JSONEncoder().encode(hotKey2) {
+            UserDefaults.standard.set(data, forKey: key2)
         }
     }
 }

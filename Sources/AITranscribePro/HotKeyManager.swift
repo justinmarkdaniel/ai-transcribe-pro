@@ -9,47 +9,85 @@ struct HotKeyModifiers: OptionSet {
     static let shift   = HotKeyModifiers(rawValue: UInt32(shiftKey))
 }
 
+struct HotKeyBinding {
+    let keyCode: UInt32
+    let modifiers: HotKeyModifiers
+    let action: () -> Void
+}
+
 final class HotKeyManager {
-    private var hotKeyRef: EventHotKeyRef?
-    private var handler: (() -> Void)?
-    private var eventHandlerRef: EventHandlerRef?
-
-    func register(keyCode: UInt32, modifiers: HotKeyModifiers, action: @escaping () -> Void) {
-        // Clear any prior registration so we can be called again when the user changes the binding.
-        unregister()
-        self.handler = action
-
-        if eventHandlerRef == nil {
-            var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                          eventKind: UInt32(kEventHotKeyPressed))
-            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-            InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
-                guard let userData else { return noErr }
-                let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
-                DispatchQueue.main.async {
-                    Log.log("hotkey", "fired")
-                    manager.handler?()
-                }
-                return noErr
-            }, 1, &eventType, selfPtr, &eventHandlerRef)
-        }
-
-        let hotKeyID = EventHotKeyID(signature: OSType(0x41495450 /* 'AITP' */), id: 1)
-        let status = RegisterEventHotKey(keyCode, modifiers.rawValue, hotKeyID,
-                                         GetApplicationEventTarget(), 0, &hotKeyRef)
-        Log.log("hotkey", "register keyCode=\(keyCode) modifiers=0x\(String(modifiers.rawValue, radix: 16)) status=\(status)")
+    private struct Registration {
+        let ref: EventHotKeyRef
+        let action: () -> Void
     }
 
-    func unregister() {
-        if let ref = hotKeyRef {
-            UnregisterEventHotKey(ref)
-            hotKeyRef = nil
-            Log.log("hotkey", "unregistered")
+    private var registrations: [UInt32: Registration] = [:]
+    private var eventHandlerRef: EventHandlerRef?
+    private var nextID: UInt32 = 1
+
+    /// Replaces all current hotkey registrations with the given bindings. Each binding fires
+    /// its own action; duplicate combos (e.g. user bound both slots to the same keys) cause
+    /// RegisterEventHotKey to fail on the second — we just log and skip.
+    func replaceAll(_ bindings: [HotKeyBinding]) {
+        unregisterAll()
+        installHandlerIfNeeded()
+        for binding in bindings {
+            let id = nextID
+            nextID &+= 1
+            let hotKeyID = EventHotKeyID(signature: OSType(0x41495450 /* 'AITP' */), id: id)
+            var ref: EventHotKeyRef?
+            let status = RegisterEventHotKey(
+                binding.keyCode,
+                binding.modifiers.rawValue,
+                hotKeyID,
+                GetApplicationEventTarget(),
+                0,
+                &ref
+            )
+            if status == noErr, let ref {
+                registrations[id] = Registration(ref: ref, action: binding.action)
+            }
+            Log.log("hotkey", "register id=\(id) keyCode=\(binding.keyCode) modifiers=0x\(String(binding.modifiers.rawValue, radix: 16)) status=\(status)")
         }
+    }
+
+    private func installHandlerIfNeeded() {
+        guard eventHandlerRef == nil else { return }
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+            guard let userData, let event else { return noErr }
+            var hotKeyID = EventHotKeyID()
+            GetEventParameter(
+                event,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &hotKeyID
+            )
+            let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+            let firedID = hotKeyID.id
+            DispatchQueue.main.async {
+                Log.log("hotkey", "fired id=\(firedID)")
+                manager.registrations[firedID]?.action()
+            }
+            return noErr
+        }, 1, &eventType, selfPtr, &eventHandlerRef)
+    }
+
+    private func unregisterAll() {
+        for (_, reg) in registrations {
+            UnregisterEventHotKey(reg.ref)
+        }
+        registrations.removeAll()
+        Log.log("hotkey", "unregistered all")
     }
 
     deinit {
-        unregister()
+        unregisterAll()
         if let eventHandlerRef { RemoveEventHandler(eventHandlerRef) }
     }
 }

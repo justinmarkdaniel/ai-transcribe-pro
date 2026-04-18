@@ -23,13 +23,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Log.log("app", "launched (log file: \(Log.fileURL.path))")
         buildPanel()
         buildStatusItem()
-        applyHotKey(settings.hotKey)
-        // Re-register the hotkey whenever the user changes the binding in settings.
+        applyHotKeys()
+        // Re-register whenever either binding changes in settings.
         settings.$hotKey
             .dropFirst()
             .sink { [weak self] new in
-                Log.log("settings", "hotkey changed to \(new.display)")
-                self?.applyHotKey(new)
+                Log.log("settings", "hotkey1 changed to \(new.display)")
+                self?.applyHotKeys()
+            }
+            .store(in: &cancellables)
+        settings.$hotKey2
+            .dropFirst()
+            .sink { [weak self] new in
+                Log.log("settings", "hotkey2 changed to \(new.display)")
+                self?.applyHotKeys()
             }
             .store(in: &cancellables)
         // Ask for mic + speech access up front so the first record press works instantly.
@@ -209,11 +216,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func applyHotKey(_ config: HotKeyConfig) {
-        Log.log("app", "applyHotKey → \(config.display)")
-        hotKey.register(keyCode: config.keyCode, modifiers: config.modifiers) { [weak self] in
-            self?.handleHotKey()
-        }
+    private func applyHotKeys() {
+        let primary = settings.hotKey
+        let secondary = settings.hotKey2
+        Log.log("app", "applyHotKeys → \(primary.display), \(secondary.display)")
+        hotKey.replaceAll([
+            HotKeyBinding(keyCode: primary.keyCode, modifiers: primary.modifiers) { [weak self] in
+                self?.handleHotKey()
+            },
+            HotKeyBinding(keyCode: secondary.keyCode, modifiers: secondary.modifiers) { [weak self] in
+                self?.handleHotKey()
+            }
+        ])
     }
 
     /// Global-hotkey action: reveal the panel and toggle the recording state.
