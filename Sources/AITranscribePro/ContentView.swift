@@ -37,11 +37,12 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.leading, 12)
-                .padding(.vertical, 8)
+                .padding(.top, 22)
+                .padding(.bottom, 8)
 
                 // Controls — fixed 2×3 square grid, flush right, so cells never shift.
                 // Row 1: stop (reserved) · primary (mic/pause) · reset
-                // Row 2: copy            · history             · gear
+                // Row 2: gear            · history             · copy
                 Grid(alignment: .trailing, horizontalSpacing: 6, verticalSpacing: 6) {
                     GridRow {
                         stopSlot
@@ -51,14 +52,13 @@ struct ContentView: View {
                         }
                     }
                     GridRow {
-                        iconButton(
-                            system: copiedFlash ? "checkmark" : "doc.on.clipboard",
-                            tint: copiedFlash ? .green : .white.opacity(0.7)
-                        ) {
-                            copyCurrent()
+                        iconButton(system: "gearshape.fill", tint: .white.opacity(0.7)) {
+                            showSettings.toggle()
                         }
-                        .disabled(!hasCopyableText)
-                        .opacity(hasCopyableText ? 1 : 0.4)
+                        .popover(isPresented: $showSettings, arrowEdge: .bottom) {
+                            SettingsView()
+                                .environmentObject(settings)
+                        }
 
                         iconButton(system: "clock.arrow.circlepath", tint: .white.opacity(0.7)) {
                             showHistory.toggle()
@@ -68,20 +68,35 @@ struct ContentView: View {
                                 .environmentObject(history)
                         }
 
-                        iconButton(system: "gearshape.fill", tint: .white.opacity(0.7)) {
-                            showSettings.toggle()
+                        iconButton(
+                            system: copiedFlash ? "checkmark" : "doc.on.clipboard",
+                            tint: copiedFlash ? .green : .white.opacity(0.7)
+                        ) {
+                            copyCurrent()
                         }
-                        .popover(isPresented: $showSettings, arrowEdge: .bottom) {
-                            SettingsView()
-                                .environmentObject(settings)
-                        }
+                        .disabled(!hasCopyableText)
+                        .opacity(hasCopyableText ? 1 : 0.4)
                     }
                 }
                 .padding(.trailing, 10)
-                .padding(.vertical, 8)
+                .padding(.top, 22)
+                .padding(.bottom, 8)
             }
         }
         .frame(minWidth: 360, minHeight: 104)
+        .overlay(alignment: .topLeading) {
+            Button(action: { NSApp.terminate(nil) }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color(white: 0.5))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 8)
+            .padding(.top, 6)
+            .help("Quit AI Transcribe Pro")
+        }
         .onAppear {
             engine.onCommit = { [weak history] text in
                 history?.add(text)

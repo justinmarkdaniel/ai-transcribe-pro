@@ -2,9 +2,10 @@ import AppKit
 import SwiftUI
 import Combine
 import Carbon.HIToolbox
+import ServiceManagement
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var panel: NSPanel!
     private var statusItem: NSStatusItem!
     private let engine = TranscriptionEngine()
@@ -14,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var visibilityObservation: NSKeyValueObservation?
     private var escapeMonitor: Any?
+    private var quitMonitor: Any?
+    private var panelToggleMenuItem: NSMenuItem?
+    private var loadOnStartupMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("app", "launched (log file: \(Log.fileURL.path))")
@@ -31,8 +35,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Ask for mic + speech access up front so the first record press works instantly.
         engine.prewarmAuthorization()
         installEscapeMonitor()
+        installQuitMonitor()
         // Show once on launch so the user sees it exists.
         showPanel()
+    }
+
+    /// Cmd+Q when the panel is key terminates the app. The app is LSUIElement so there's no
+    /// main menu wiring cmd+Q automatically — do it explicitly here. Escape is handled separately
+    /// and its behaviour is unchanged.
+    private func installQuitMonitor() {
+        quitMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            let isCmdQ = event.modifierFlags.contains(.command)
+                && event.charactersIgnoringModifiers?.lowercased() == "q"
+            guard isCmdQ, self.panel.isKeyWindow else { return event }
+            Log.log("app", "cmd+Q in panel → terminate")
+            NSApp.terminate(nil)
+            return nil
+        }
     }
 
     /// Escape key behaviour:
@@ -65,18 +85,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let panel = NSPanel(
             contentRect: NSRect(origin: origin, size: size),
-            styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel, .hudWindow],
+            styleMask: [.titled, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Transcribe"
+        panel.title = ""
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.becomesKeyOnlyIfNeeded = true
-        panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
         panel.appearance = NSAppearance(named: .darkAqua)
 
@@ -124,8 +151,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Transcribe")
             button.image?.isTemplate = true
-            button.action = #selector(togglePanel)
-            button.target = self
+        }
+        let menu = NSMenu()
+        menu.delegate = self
+        menu.autoenablesItems = false
+
+        let toggleItem = NSMenuItem(title: "Show Window", action: #selector(togglePanel), keyEquivalent: "")
+        toggleItem.target = self
+        menu.addItem(toggleItem)
+        panelToggleMenuItem = toggleItem
+
+        menu.addItem(.separator())
+
+        let startupItem = NSMenuItem(title: "Load on Startup", action: #selector(toggleLoadOnStartup), keyEquivalent: "")
+        startupItem.target = self
+        menu.addItem(startupItem)
+        loadOnStartupMenuItem = startupItem
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "Quit AI Transcribe Pro", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(quitItem)
+
+        statusItem.menu = menu
+    }
+
+    // MARK: - NSMenuDelegate
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        panelToggleMenuItem?.title = panel.isVisible ? "Hide Window" : "Show Window"
+        loadOnStartupMenuItem?.state = isLaunchAtLoginEnabled() ? .on : .off
+    }
+
+    // MARK: - Load on Startup
+
+    private func isLaunchAtLoginEnabled() -> Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    @objc private func toggleLoadOnStartup() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+                Log.log("app", "load on startup → disabled")
+            } else {
+                try service.register()
+                Log.log("app", "load on startup → enabled")
+            }
+        } catch {
+            Log.log("app", "load on startup toggle failed: \(error.localizedDescription)")
+            let alert = NSAlert()
+            alert.messageText = "Couldn't update login item"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
         }
     }
 
