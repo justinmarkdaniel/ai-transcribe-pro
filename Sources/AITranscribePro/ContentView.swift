@@ -42,7 +42,9 @@ struct ContentView: View {
         }
         .frame(minWidth: 360, minHeight: 104)
         .overlay(alignment: .topLeading) {
-            Button(action: { NSApp.terminate(nil) }) {
+            Button(action: {
+                NotificationCenter.default.post(name: .hidePanelRequest, object: nil)
+            }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(Color(white: 0.5))
@@ -52,7 +54,7 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .padding(.leading, 8)
             .padding(.top, 6)
-            .help("Quit AI Transcribe Pro")
+            .help("Hide window (reopen with the shortcut or menu bar)")
         }
         .overlay(alignment: .bottom) {
             bottomControls

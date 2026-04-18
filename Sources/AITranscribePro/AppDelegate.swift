@@ -4,6 +4,12 @@ import Combine
 import Carbon.HIToolbox
 import ServiceManagement
 
+extension Notification.Name {
+    /// Posted by the in-panel close (X) button to ask the app to hide the panel
+    /// without terminating — the app stays alive in the status bar.
+    static let hidePanelRequest = Notification.Name("AITP.hidePanelRequest")
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var panel: NSPanel!
@@ -43,21 +49,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         engine.prewarmAuthorization()
         installEscapeMonitor()
         installQuitMonitor()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleHidePanelRequest),
+            name: .hidePanelRequest,
+            object: nil
+        )
         // Show once on launch so the user sees it exists.
         showPanel()
     }
 
-    /// Cmd+Q when the panel is key terminates the app. The app is LSUIElement so there's no
-    /// main menu wiring cmd+Q automatically — do it explicitly here. Escape is handled separately
-    /// and its behaviour is unchanged.
+    /// X button in the panel asks to hide (not quit). Stop any active recording so the mic
+    /// isn't held open, then order the panel out — the status bar icon stays, and any
+    /// registered global shortcut brings it back via showPanel().
+    @objc private func handleHidePanelRequest() {
+        Log.log("app", "hide panel request → shutting down engine and hiding")
+        engine.shutdown()
+        panel.orderOut(nil)
+    }
+
+    /// Cmd+Q when the panel is key hides the panel (same as the X button). The app stays
+    /// alive in the status bar so a global shortcut brings it back. To fully quit, use the
+    /// status-bar menu's Quit item. Escape is handled separately and its behaviour is unchanged.
     private func installQuitMonitor() {
         quitMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             let isCmdQ = event.modifierFlags.contains(.command)
                 && event.charactersIgnoringModifiers?.lowercased() == "q"
             guard isCmdQ, self.panel.isKeyWindow else { return event }
-            Log.log("app", "cmd+Q in panel → terminate")
-            NSApp.terminate(nil)
+            Log.log("app", "cmd+Q in panel → hide")
+            self.handleHidePanelRequest()
             return nil
         }
     }
