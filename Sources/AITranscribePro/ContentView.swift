@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var showHistory = false
     @State private var showSettings = false
     @State private var copiedFlash = false
+    @State private var isExpanded = false
 
     var body: some View {
         ZStack {
@@ -55,6 +56,24 @@ struct ContentView: View {
             .padding(.leading, 8)
             .padding(.top, 6)
             .help("Hide window (reopen with the shortcut or menu bar)")
+        }
+        .overlay(alignment: .topTrailing) {
+            Button(action: {
+                NotificationCenter.default.post(name: .toggleExpandRequest, object: nil)
+            }) {
+                Image(systemName: isExpanded ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color(white: 0.5))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 8)
+            .padding(.top, 6)
+            .help(isExpanded ? "Restore panel size" : "Expand panel to full screen height")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .panelExpansionChanged)) { note in
+            isExpanded = (note.userInfo?["expanded"] as? Bool) ?? false
         }
         .overlay(alignment: .bottom) {
             bottomControls

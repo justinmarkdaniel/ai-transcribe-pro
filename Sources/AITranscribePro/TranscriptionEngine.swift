@@ -60,12 +60,20 @@ final class TranscriptionEngine: ObservableObject {
         }
     }
 
+    /// Reset/restart: commit whatever's currently on-screen to history, then start a fresh
+    /// recording session. Works from any state — if we were recording, the session is swapped
+    /// out for a new one (brief tear-down + restart); if idle/paused/stopped, recording begins.
+    /// The reset icon therefore always lands the user in an active recording.
     func reset() {
+        Log.log("engine", "reset() from state=\(state)")
+        let currentText = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentText.isEmpty {
+            onCommit?(currentText)
+        }
         stopAudio()
-        transcript = ""
-        committedPrefix = ""
-        state = .idle
         errorMessage = nil
+        state = .idle
+        start()
     }
 
     func stop() {

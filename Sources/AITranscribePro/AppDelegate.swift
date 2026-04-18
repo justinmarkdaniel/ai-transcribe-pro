@@ -8,6 +8,18 @@ extension Notification.Name {
     /// Posted by the in-panel close (X) button to ask the app to hide the panel
     /// without terminating — the app stays alive in the status bar.
     static let hidePanelRequest = Notification.Name("AITP.hidePanelRequest")
+    /// Posted by the in-panel expand/restore button to toggle full-screen-height layout.
+    static let toggleExpandRequest = Notification.Name("AITP.toggleExpandRequest")
+    /// Broadcast back from AppDelegate whenever the panel's expanded state changes,
+    /// so the in-panel button can flip its icon. userInfo["expanded"] = Bool.
+    static let panelExpansionChanged = Notification.Name("AITP.panelExpansionChanged")
+}
+
+/// Borderless NSPanel that still accepts keyboard input (Escape handler, cmd+Q, etc.)
+/// By default borderless windows return false from canBecomeKey / canBecomeMain.
+final class ResizableBorderlessPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
 
 @MainActor
@@ -24,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var quitMonitor: Any?
     private var panelToggleMenuItem: NSMenuItem?
     private var loadOnStartupMenuItem: NSMenuItem?
+    /// When the panel is expanded to full screen height, this holds the frame we should
+    /// restore to. Nil means we're in the normal/compact state.
+    private var savedNormalFrame: NSRect?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("app", "launched (log file: \(Log.fileURL.path))")
@@ -55,6 +70,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             name: .hidePanelRequest,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleToggleExpandRequest),
+            name: .toggleExpandRequest,
+            object: nil
+        )
         // Show once on launch so the user sees it exists.
         showPanel()
     }
@@ -66,6 +87,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Log.log("app", "hide panel request → shutting down engine and hiding")
         engine.shutdown()
         panel.orderOut(nil)
+    }
+
+    /// Expand/restore toggle: stretches the panel to the visible screen height (keeping x
+    /// position and width) or returns it to the frame we saved before expanding. The panel
+    /// stays resizable in both modes — grabbing a corner changes size freely, and if you
+    /// resize while expanded the restore step still returns to the pre-expansion frame.
+    @objc private func handleToggleExpandRequest() {
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        if let saved = savedNormalFrame {
+            Log.log("app", "expand toggle → restore")
+            panel.setFrame(saved, display: true, animate: true)
+            savedNormalFrame = nil
+            broadcastExpansion(false)
+        } else {
+            Log.log("app", "expand toggle → expand to full height")
+            savedNormalFrame = panel.frame
+            let current = panel.frame
+            let newFrame = NSRect(
+                x: current.origin.x,
+                y: visible.minY,
+                width: current.width,
+                height: visible.height
+            )
+            panel.setFrame(newFrame, display: true, animate: true)
+            broadcastExpansion(true)
+        }
+    }
+
+    private func broadcastExpansion(_ expanded: Bool) {
+        NotificationCenter.default.post(
+            name: .panelExpansionChanged,
+            object: nil,
+            userInfo: ["expanded": expanded]
+        )
     }
 
     /// Cmd+Q when the panel is key hides the panel (same as the X button). The app stays
@@ -111,18 +167,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             y: screen.maxY - size.height - 24
         )
 
-        let panel = NSPanel(
+        // Borderless + resizable so all four edges and corners are draggable resize handles —
+        // with .titled the hidden titlebar stole the top corners, so top-left/top-right
+        // resize didn't work. Movement is via the window background (the custom content
+        // already looks like a chrome-less pill).
+        let panel = ResizableBorderlessPanel(
             contentRect: NSRect(origin: origin, size: size),
-            styleMask: [.titled, .nonactivatingPanel, .fullSizeContentView],
+            styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
         )
-        panel.title = ""
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
