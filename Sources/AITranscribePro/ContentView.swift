@@ -66,6 +66,12 @@ struct ContentView: View {
                 history?.add(text)
             }
         }
+        // Auto-copy + flash whenever recording is paused or stopped (via button or hotkey).
+        .onChange(of: engine.state) { newState in
+            if newState == .paused || newState == .stopped {
+                autoCopyTranscript()
+            }
+        }
     }
 
     /// Bottom row: gear (leading) · stop/primary/reset (true-centered) · history/copy (trailing, 6pt).
@@ -184,6 +190,18 @@ struct ContentView: View {
 
     private func copyCurrent() {
         guard let text = copyableText else { return }
+        writeToClipboardAndFlash(text)
+    }
+
+    /// Called on pause/stop transitions — copies the current transcript only (not history)
+    /// so the flash is a true confirmation of "what you just recorded is on the clipboard".
+    private func autoCopyTranscript() {
+        let current = engine.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty else { return }
+        writeToClipboardAndFlash(current)
+    }
+
+    private func writeToClipboardAndFlash(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         withAnimation { copiedFlash = true }

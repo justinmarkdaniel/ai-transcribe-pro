@@ -43,16 +43,12 @@ final class TranscriptionEngine: ObservableObject {
         requestAuthorization { _ in }
     }
 
-    /// Called by the global hotkey: start a fresh recording, or stop an in-progress one.
-    /// Paused counts as "in progress" — the hotkey finalises it.
+    /// Global hotkey mirrors the primary mic button: idle/stopped → start, recording → pause,
+    /// paused → resume. The earlier "hotkey stops recording" behaviour was replaced so pause is
+    /// reachable without the mouse; the auto-copy on pause/stop is handled at the view layer.
     func hotKeyTriggered() {
         Log.log("engine", "hotKeyTriggered state=\(state)")
-        switch state {
-        case .recording, .paused:
-            stop()
-        case .idle, .stopped:
-            start()
-        }
+        toggleRecord()
     }
 
     func toggleRecord() {
