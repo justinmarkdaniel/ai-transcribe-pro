@@ -195,6 +195,7 @@ final class TranscriptionEngine: ObservableObject {
         pendingSettleWork?.cancel()
         pendingSettleWork = nil
         transcript = ""
+        draftURL = nil   // new session => new draft file
         requestAuthorization { [weak self] granted in
             guard let self else { return }
             if granted {
@@ -400,6 +401,23 @@ final class TranscriptionEngine: ObservableObject {
         transcript = [committedPrefix, pendingText, liveText]
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+        saveDraft()
+    }
+
+    // Safety net: the live transcript is mirrored to disk on every update, one file per session, in
+    // ~/Library/Application Support/AITranscribePro/Drafts/. Nothing the recognizer has produced
+    // can be lost to a logic bug again — worst case you open the draft file.
+    private var draftURL: URL?
+    private func saveDraft() {
+        guard !transcript.isEmpty else { return }
+        if draftURL == nil {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("AITranscribePro/Drafts", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            draftURL = dir.appendingPathComponent("draft-\(f.string(from: Date())).txt")
+        }
+        if let url = draftURL { try? transcript.write(to: url, atomically: true, encoding: .utf8) }
     }
 
     /// Folds the finalizing segment into the committed prefix. `finalText`, when present, is the
@@ -475,7 +493,7 @@ final class TranscriptionEngine: ObservableObject {
             Task { @MainActor in
                 guard self.state == .recording else { return }
                 if generation == self.liveGeneration {
-                    if let text { self.liveText = text }
+                    if let text, !text.isEmpty { self.liveText = text }
                     self.lastResultAt = Date()
                     self.resultCount += 1
                     self.composeTranscript()
@@ -488,7 +506,11 @@ final class TranscriptionEngine: ObservableObject {
                 } else if generation == self.pendingGeneration {
                     // The rotated-out segment is still reporting. Keep showing its latest text, and
                     // when its FINAL lands, fold it in — this is the tail the old code discarded.
-                    if let text { self.pendingText = text }
+                    // NEVER let an empty result blank the held text: after a long silence the old
+                    // request's final result is "", which used to wipe the whole segment (lost a
+                    // 4-minute recording). Only a non-empty transcription may replace it.
+                    Log.log("engine", "late result gen=\(generation) chars=\(text?.count ?? -1) final=\(isFinal) held=\(self.pendingText.count)")
+                    if let text, !text.isEmpty { self.pendingText = text }
                     self.composeTranscript()
                     if error != nil || isFinal {
                         self.settlePending(finalText: text)
